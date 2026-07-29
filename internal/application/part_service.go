@@ -33,11 +33,23 @@ func (s *PartService) GetPartByID(ctx context.Context, id uuid.UUID) (*domain.Pa
 	return s.repo.GetByID(ctx, id)
 }
 
+// Default and maximum page sizes for ListParts. The HTTP adapter rejects
+// out-of-range values before they reach here; these bounds keep the use case safe
+// for any other caller.
+const (
+	defaultListLimit = 50
+	maxListLimit     = 100
+)
+
+// ListParts returns one page of parts plus the total matching the filter.
+//
+// The filter is clamped rather than rejected: this is the use case's own contract,
+// independent of the stricter 400 the HTTP adapter returns for the same values.
 func (s *PartService) ListParts(ctx context.Context, filter ListFilter) ([]*domain.Part, int, error) {
 	if filter.Limit <= 0 {
-		filter.Limit = 50
-	} else if filter.Limit > 100 {
-		filter.Limit = 100
+		filter.Limit = defaultListLimit
+	} else if filter.Limit > maxListLimit {
+		filter.Limit = maxListLimit
 	}
 	if filter.Offset < 0 {
 		filter.Offset = 0

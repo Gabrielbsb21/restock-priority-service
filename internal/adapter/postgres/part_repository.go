@@ -10,6 +10,26 @@ import (
 	"gorm.io/gorm"
 )
 
+var _ application.PartRepository = (*PartRepository)(nil)
+
+// mutableColumns are the columns a full replacement is allowed to write.
+//
+// Naming them explicitly is required, not stylistic: Updates with a struct skips
+// zero-valued fields, so a full replacement setting currentStock, minimumStock or
+// leadTimeDays to 0 would silently keep the previous value. Listing a column makes
+// GORM write it even when it is zero. id and created_at are deliberately absent;
+// updated_at is absent because autoUpdateTime sets it regardless of this list.
+var mutableColumns = []string{
+	"name",
+	"category",
+	"current_stock",
+	"minimum_stock",
+	"average_daily_sales",
+	"lead_time_days",
+	"unit_cost",
+	"criticality_level",
+}
+
 type PartRepository struct {
 	db *gorm.DB
 }
@@ -36,19 +56,23 @@ func (r *PartRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Par
 }
 
 func (r *PartRepository) List(ctx context.Context, filter application.ListFilter) ([]*domain.Part, int, error) {
-	query := r.db.WithContext(ctx).Model(&PartModel{})
-
-	if filter.Category != "" {
-		query = query.Where("category = ?", filter.Category)
+	// Each finisher gets a fresh statement. Reusing one *gorm.DB across Count and
+	// Find lets conditions from the first call leak into the second.
+	filtered := func() *gorm.DB {
+		query := r.db.WithContext(ctx).Model(&PartModel{})
+		if filter.Category != "" {
+			query = query.Where("category = ?", filter.Category)
+		}
+		return query
 	}
 
 	var total int64
-	if err := query.Count(&total).Error; err != nil {
+	if err := filtered().Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 
 	var models []PartModel
-	err := query.
+	err := filtered().
 		Order("LOWER(name) ASC").
 		Order("id ASC").
 		Offset(filter.Offset).
@@ -68,7 +92,11 @@ func (r *PartRepository) List(ctx context.Context, filter application.ListFilter
 
 func (r *PartRepository) Update(ctx context.Context, part *domain.Part) error {
 	model := FromDomain(part)
-	res := r.db.WithContext(ctx).Model(&PartModel{}).Where("id = ?", part.ID).Updates(model)
+	res := r.db.WithContext(ctx).
+		Model(&PartModel{}).
+		Where("id = ?", part.ID).
+		Select(mutableColumns).
+		Updates(model)
 	if res.Error != nil {
 		return res.Error
 	}
