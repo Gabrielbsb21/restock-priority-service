@@ -91,7 +91,10 @@ strength.
 
 ## HTTP
 
-- Use `net/http` unless an approved specification establishes a framework need.
+- Use `net/http` unless an approved specification or an accepted ADR establishes a
+  framework need. The HTTP adapter's use of Gin is the recorded exception; see
+  [ADR-001](../sdd/decisions/001-http-framework-gin.md) for the decision and the
+  constraints that bound it.
 - Keep handlers small: decode, invoke a use case, and encode.
 - Limit request body size and reject unknown JSON fields.
 - Write a response status once and return immediately after failures.

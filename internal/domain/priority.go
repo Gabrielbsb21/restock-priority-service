@@ -8,13 +8,16 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// PriorityItem is a ranked restock candidate. It carries no serialization tags on
+// purpose: the transport layer owns the wire contract and maps this type into its
+// own response struct.
 type PriorityItem struct {
-	PartID         uuid.UUID       `json:"partId"`
-	Name           string          `json:"name"`
-	CurrentStock   int64           `json:"currentStock"`
-	ProjectedStock decimal.Decimal `json:"projectedStock"`
-	MinimumStock   int64           `json:"minimumStock"`
-	UrgencyScore   decimal.Decimal `json:"urgencyScore"`
+	PartID         uuid.UUID
+	Name           string
+	CurrentStock   int64
+	ProjectedStock decimal.Decimal
+	MinimumStock   int64
+	UrgencyScore   decimal.Decimal
 
 	// Internal fields for sorting criteria (BR-006, BR-007)
 	criticalityLevel  int

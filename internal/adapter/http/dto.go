@@ -6,6 +6,20 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// jsonDecimal serializes an exact decimal as a JSON number.
+//
+// decimal.Decimal marshals to a quoted string by default, which the API contract
+// forbids. Wrapping it keeps the fix in the transport layer, rather than flipping
+// the library's package-level MarshalJSONWithoutQuotes global — that would be
+// mutable package state and would not hold inside tests that never set it.
+type jsonDecimal struct {
+	decimal.Decimal
+}
+
+func (d jsonDecimal) MarshalJSON() ([]byte, error) {
+	return []byte(d.String()), nil
+}
+
 type PartWriteRequest struct {
 	Name              *string          `json:"name"`
 	Category          *string          `json:"category"`
@@ -64,15 +78,15 @@ func (r *PartWriteRequest) ToDomain() (*domain.Part, domain.FieldErrors) {
 }
 
 type PartResponse struct {
-	ID                uuid.UUID       `json:"id"`
-	Name              string          `json:"name"`
-	Category          string          `json:"category"`
-	CurrentStock      int64           `json:"currentStock"`
-	MinimumStock      int64           `json:"minimumStock"`
-	AverageDailySales decimal.Decimal `json:"averageDailySales"`
-	LeadTimeDays      int32           `json:"leadTimeDays"`
-	UnitCost          decimal.Decimal `json:"unitCost"`
-	CriticalityLevel  int             `json:"criticalityLevel"`
+	ID                uuid.UUID   `json:"id"`
+	Name              string      `json:"name"`
+	Category          string      `json:"category"`
+	CurrentStock      int64       `json:"currentStock"`
+	MinimumStock      int64       `json:"minimumStock"`
+	AverageDailySales jsonDecimal `json:"averageDailySales"`
+	LeadTimeDays      int32       `json:"leadTimeDays"`
+	UnitCost          jsonDecimal `json:"unitCost"`
+	CriticalityLevel  int         `json:"criticalityLevel"`
 }
 
 func NewPartResponse(p *domain.Part) PartResponse {
@@ -82,9 +96,9 @@ func NewPartResponse(p *domain.Part) PartResponse {
 		Category:          p.Category,
 		CurrentStock:      p.CurrentStock,
 		MinimumStock:      p.MinimumStock,
-		AverageDailySales: p.AverageDailySales,
+		AverageDailySales: jsonDecimal{p.AverageDailySales},
 		LeadTimeDays:      p.LeadTimeDays,
-		UnitCost:          p.UnitCost,
+		UnitCost:          jsonDecimal{p.UnitCost},
 		CriticalityLevel:  p.CriticalityLevel,
 	}
 }
@@ -100,6 +114,36 @@ type ListPartsResponse struct {
 	Pagination PaginationMeta `json:"pagination"`
 }
 
+// PriorityItemResponse is the wire shape of a ranked restock candidate. The
+// contract is exactly these six fields: category, criticality, sales, unit cost and
+// expected consumption are deliberately absent.
+type PriorityItemResponse struct {
+	PartID         uuid.UUID   `json:"partId"`
+	Name           string      `json:"name"`
+	CurrentStock   int64       `json:"currentStock"`
+	ProjectedStock jsonDecimal `json:"projectedStock"`
+	MinimumStock   int64       `json:"minimumStock"`
+	UrgencyScore   jsonDecimal `json:"urgencyScore"`
+}
+
 type PriorityListResponse struct {
-	Priorities []domain.PriorityItem `json:"priorities"`
+	Priorities []PriorityItemResponse `json:"priorities"`
+}
+
+// NewPriorityListResponse always builds a non-nil slice so an empty ranking
+// serializes as [] rather than null.
+func NewPriorityListResponse(items []domain.PriorityItem) PriorityListResponse {
+	priorities := make([]PriorityItemResponse, 0, len(items))
+	for _, item := range items {
+		priorities = append(priorities, PriorityItemResponse{
+			PartID:         item.PartID,
+			Name:           item.Name,
+			CurrentStock:   item.CurrentStock,
+			ProjectedStock: jsonDecimal{item.ProjectedStock},
+			MinimumStock:   item.MinimumStock,
+			UrgencyScore:   jsonDecimal{item.UrgencyScore},
+		})
+	}
+
+	return PriorityListResponse{Priorities: priorities}
 }

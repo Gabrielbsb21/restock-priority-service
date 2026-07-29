@@ -1,8 +1,14 @@
+// Command api serves the restock priority HTTP API.
+//
+// This file is the composition root: it is the only place that knows the complete
+// object graph, and the only place that chooses PostgreSQL as the adapter behind the
+// application's ports.
 package main
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,73 +23,109 @@ import (
 	"github.com/Gabrielbsb21/restock-priority-service/internal/platform/config"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
+)
+
+const (
+	readTimeout       = 10 * time.Second
+	readHeaderTimeout = 5 * time.Second
+	writeTimeout      = 10 * time.Second
+	idleTimeout       = 60 * time.Second
+	shutdownTimeout   = 5 * time.Second
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	slog.SetDefault(logger)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
-	cfg, err := config.Load()
-	if err != nil {
-		slog.Error("failed to load configuration", "error", err)
+	if err := run(); err != nil {
+		slog.Error("service stopped with an error", "error", err)
 		os.Exit(1)
 	}
+}
 
-	var db *gorm.DB
-	if cfg.DatabaseURL != "" {
-		gormDB, err := gorm.Open(postgres.Open(cfg.DatabaseURL), &gorm.Config{})
-		if err != nil {
-			slog.Warn("could not connect to database at startup", "error", err)
-		} else {
-			db = gormDB
-			slog.Info("connected to postgresql successfully")
-
-			// Run auto-migration for Parts table
-			if err := db.AutoMigrate(&adapterPG.PartModel{}); err != nil {
-				slog.Error("failed to run database auto-migration", "error", err)
-			}
-		}
+func run() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load configuration: %w", err)
 	}
 
-	var repo application.PartRepository
-	if db != nil {
-		repo = adapterPG.NewPartRepository(db)
+	// gorm.Open pings the database, so an unreachable server fails here. Serving
+	// anyway would answer every CRUD and ranking request with a panic, so startup
+	// fails instead of degrading silently.
+	//
+	// GORM's own logger is discarded: it writes coloured, unstructured lines, and
+	// every failure is already logged once by the boundary that has the request
+	// context.
+	db, err := gorm.Open(postgres.Open(cfg.DatabaseURL), &gorm.Config{
+		Logger: gormlogger.Discard,
+	})
+	if err != nil {
+		return fmt.Errorf("connect to postgresql: %w", err)
 	}
 
-	partService := application.NewPartService(repo)
-	priorityEngine := domain.NewPriorityEngine()
-	priorityService := application.NewPriorityService(repo, priorityEngine)
-
-	router := adapterHTTP.NewRouter(cfg.GinMode, partService, priorityService, db)
-
-	srv := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      router,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  60 * time.Second,
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("resolve database handle: %w", err)
 	}
-
-	go func() {
-		slog.Info("starting HTTP server", "port", cfg.Port)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("HTTP server failed", "error", err)
+	defer func() {
+		if closeErr := sqlDB.Close(); closeErr != nil {
+			slog.Warn("could not close database", "error", closeErr)
 		}
 	}()
 
-	// Graceful shutdown handling
+	slog.Info("connected to postgresql")
+
+	// Schema changes are applied by cmd/migrate before this process starts, never
+	// from here and never during request handling.
+
+	repo := adapterPG.NewPartRepository(db)
+	readiness := adapterPG.NewReadinessChecker(db)
+
+	partService := application.NewPartService(repo)
+	priorityService := application.NewPriorityService(repo, domain.NewPriorityEngine())
+
+	router := adapterHTTP.NewRouter(cfg.GinMode, partService, priorityService, readiness)
+
+	srv := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           router,
+		ReadTimeout:       readTimeout,
+		ReadHeaderTimeout: readHeaderTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+	}
+
+	serverErr := make(chan error, 1)
+	go func() {
+		slog.Info("starting HTTP server", "port", cfg.Port)
+		if listenErr := srv.ListenAndServe(); listenErr != nil && !errors.Is(listenErr, http.ErrServerClosed) {
+			serverErr <- listenErr
+			return
+		}
+		serverErr <- nil
+	}()
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
 
-	slog.Info("shutting down HTTP server gracefully...")
+	select {
+	case listenErr := <-serverErr:
+		if listenErr != nil {
+			return fmt.Errorf("http server: %w", listenErr)
+		}
+		return nil
+	case sig := <-quit:
+		slog.Info("shutting down", "signal", sig.String())
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		slog.Error("server forced to shutdown", "error", err)
+		return fmt.Errorf("graceful shutdown: %w", err)
 	}
 
-	slog.Info("server shutdown complete")
+	slog.Info("shutdown complete")
+
+	return nil
 }

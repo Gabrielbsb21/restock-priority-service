@@ -1,19 +1,31 @@
 package domain
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 )
 
+// FieldErrors reports every invalid field of a single request at once, keyed by the
+// field name used on the wire.
 type FieldErrors map[string]string
 
+// Error renders the fields in sorted order so the message is stable. Ranging over
+// the map directly would produce a different string on every call.
 func (fe FieldErrors) Error() string {
-	var msgs []string
-	for k, v := range fe {
-		msgs = append(msgs, k+": "+v)
+	names := make([]string, 0, len(fe))
+	for name := range fe {
+		names = append(names, name)
 	}
+	sort.Strings(names)
+
+	msgs := make([]string, 0, len(names))
+	for _, name := range names {
+		msgs = append(msgs, name+": "+fe[name])
+	}
+
 	return strings.Join(msgs, "; ")
 }
 

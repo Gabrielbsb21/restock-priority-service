@@ -2,12 +2,12 @@
 
 | Field | Value |
 | --- | --- |
-| Status | Approved |
+| Status | Verified |
 | Authors | Restock Priority Service team |
 | Created | 2026-07-27 |
-| Updated | 2026-07-27 |
+| Updated | 2026-07-28 |
 | Target version | v1 |
-| Related ADRs | None |
+| Related ADRs | [ADR-001](../decisions/001-http-framework-gin.md), [ADR-002](../decisions/002-persistence-gorm.md), [ADR-003](../decisions/003-openapi-documentation.md) |
 | Supersedes | None |
 
 ## Context
@@ -146,6 +146,11 @@ of the v1 public part representation.
 - Decimal values are JSON numbers.
 - A validation error may report more than one invalid field.
 - Unexpected internal details must not be exposed.
+- The contract described here is also published as an OpenAPI 3.0 document,
+  `api/openapi.yaml`, served at `GET /openapi.yaml` with a Swagger UI at `GET /docs`.
+  Both are served from assets embedded in the binary, so they need no network access.
+  This specification remains the source of truth: the document describes the same
+  contract for tooling, and a test fails if it and the router disagree.
 
 ### Error envelope
 
@@ -172,10 +177,17 @@ Stable v1 error codes:
 | `400` | `invalid_request` | Malformed JSON, unknown fields, invalid UUID, or invalid query parameters |
 | `400` | `validation_error` | Domain input violates one or more field invariants |
 | `404` | `part_not_found` | The requested part does not exist |
+| `404` | `not_found` | The requested path is not a route this service serves |
 | `405` | `method_not_allowed` | The path exists but does not support the method |
 | `413` | `request_too_large` | Request body exceeds the configured limit |
 | `500` | `internal_error` | Unexpected application or dependency failure |
 | `503` | `service_unavailable` | Readiness dependency is unavailable |
+
+The two `404` codes are distinct on purpose. `part_not_found` means a part was looked up
+by a valid identifier and does not exist. `not_found` means the request did not address a
+route this service serves, so no part was looked up at all. Reporting `part_not_found`
+for an unknown path would tell a client that a part is missing when the path is what was
+wrong.
 
 ## API contracts
 
@@ -386,39 +398,80 @@ Successful response:
 
 - **Domain unit tests:** table-driven coverage of every formula, threshold,
   negative value behavior, decimal calculation, and ordering criterion.
-- **Application tests:** explicit fake repository coverage for CRUD orchestration,
-  missing resources, and dependency errors.
+- **Application tests:** coverage for CRUD orchestration, missing resources, and
+  dependency errors, over the in-process repository in `internal/adapter/memory` plus a
+  small explicit stub for the failure paths.
 - **HTTP tests:** `httptest` coverage for payload parsing, validation, query
   parsing, status codes, headers, envelopes, and empty collections.
-- **PostgreSQL integration tests:** migrations, record mapping, CRUD, category
-  filtering, pagination, constraints, and context-aware repository operations.
+- **PostgreSQL statement tests:** the SQL the adapter builds, asserted under GORM's
+  `DryRun` without contacting a server, plus round-trip coverage of the record mapping.
+  This is what guards a full replacement writing every mutable column, including zero
+  values.
+- **PostgreSQL integration tests:** migrations, CRUD against a real instance, category
+  filtering, pagination, constraints, and context-aware repository operations. Not yet
+  automated; see the manual verification below.
 - **End-to-end test:** create multiple parts through HTTP and verify the complete
   priority response and ordering.
 
 ## Verification matrix
 
-| Requirements | Acceptance criteria | Planned verification |
-| --- | --- | --- |
-| FR-001, FR-010 | AC-001, AC-004, AC-014 | HTTP create contract tests and PostgreSQL integration tests |
-| FR-002, FR-005, FR-006 | AC-002, AC-005 | Application and HTTP CRUD tests |
-| FR-003, FR-004 | AC-003 | Repository integration and HTTP list tests |
-| FR-007 | AC-006 through AC-012, AC-015, AC-016 | Domain ranking unit tests and end-to-end priority test |
-| FR-008 | AC-013 | HTTP health tests with available and unavailable repository dependencies |
-| FR-009 | AC-002, AC-003 | PostgreSQL adapter integration tests and compile-time interface conformance |
+Run with `make check`, which is `make lint`, `make test` and `make test-race`.
 
-Actual test names and commands must replace planned verification before this
-specification moves to `Verified`.
+| Requirements | Acceptance criteria | Verification |
+| --- | --- | --- |
+| FR-001, FR-010 | AC-001, AC-004, AC-014 | `TestHTTP_CreatePart`, `TestHTTP_CreatePart_NormalizesInput`, `TestHTTP_CreatePart_ValidationErrors`, `TestHTTP_MalformedRequestBodies`, `TestPartService_CreatePart` |
+| FR-002, FR-005, FR-006 | AC-002, AC-005 | `TestHTTP_GetPartByID`, `TestHTTP_UpdatePart`, `TestHTTP_DeletePart`, `TestPartService_GetPartByID`, `TestPartService_UpdatePart`, `TestPartService_DeletePart`, `TestPartRepository_UpdateWritesEveryMutableColumn`, `TestPartRepository_UpdateNeverWritesImmutableColumns` |
+| FR-003, FR-004 | AC-003 | `TestHTTP_ListParts_EmptyCollection`, `TestHTTP_ListParts_CategoryFilter`, `TestHTTP_ListParts_QueryValidation`, `TestHTTP_ListParts_Pagination`, `TestPartService_ListParts` |
+| FR-007 | AC-006 through AC-012, AC-015, AC-016 | `TestPriorityEngine_Formulas`, `TestPriorityEngine_Ordering`, `TestPriorityEngine_CompleteTieOrdersByIdentifier`, `TestPriorityEngine_UnitCostIsNotARankingInput`, `TestPriorityEngine_EmptyResults`, `TestPriorityEngine_IsDeterministic`, `TestPriorityEngine_DoesNotMutateInput`, `TestPriorityService_*`, `TestHTTP_RestockPriorities_*` |
+| FR-008 | AC-013 | `TestHTTP_Health` |
+| FR-009 | AC-002, AC-003 | `internal/adapter/memory` port implementation exercised by every application and HTTP test, plus `var _ application.PartRepository` conformance assertions in both adapters. `TestPartModel_MapsEveryDomainField` covers the record mapping. Row-level PostgreSQL behaviour is covered by the manual verification below. |
+| FR-010 | AC-014 | `TestHTTP_MalformedRequestBodies`, `TestHTTP_Routing`, `TestHTTP_RepositoryFailuresReturnTheEnvelope`, `TestOpenAPI_DeclaresEveryErrorCode` |
+| API documentation | — | `TestOpenAPI_MatchesRegisteredRoutes`, `TestOpenAPI_UndocumentedRoutesAreAllServed`, `TestOpenAPI_EveryReferenceResolves`, `TestHTTP_ServesTheOpenAPIDocument`, `TestHTTP_ServesSwaggerUI` |
+
+### Manual verification against PostgreSQL
+
+Automated integration tests against a real PostgreSQL instance are the one test level
+from the strategy above that is not yet implemented, so the behaviour that only appears
+with a real database was verified by hand on 2026-07-28 against the compose stack. Each
+step is reproducible with `make docker-up`.
+
+| Behaviour | Command | Result |
+| --- | --- | --- |
+| Migrations apply in order before the API serves traffic | `docker compose up` | `00001` then `00002`, then the API starts |
+| The five CHECK constraints exist and reject invalid rows | direct `INSERT` of `criticality_level=9`, `minimum_stock=-1`, `unit_cost=-5` | each rejected by its named constraint |
+| Negative current stock is accepted by the schema (BR-010) | direct `INSERT` of `current_stock=-999` | accepted |
+| Full replacement writes zero values | `PUT` with `currentStock=0`, `minimumStock=0`, `leadTimeDays=0`, then `GET` | all three stored as `0` |
+| Replacement preserves `created_at` and advances `updated_at` | `SELECT created_at < updated_at` after the `PUT` above | true, and `created_at` retained |
+| AC-006 over the wire, decimals unquoted | `GET /restock/priorities` | `"projectedStock":-5, ..., "urgencyScore":75` |
+| Liveness and readiness diverge when the database stops (AC-013) | stop PostgreSQL, then probe both | `/healthz` `200`, `/readyz` `503` |
+| A dependency failure returns the envelope and logs the cause | `GET /parts` with PostgreSQL stopped | `500 internal_error`, cause logged with the request ID |
+| Startup fails rather than serving without persistence | start the API with PostgreSQL down | exit code `1`, nothing bound to the port |
+| Graceful shutdown on `SIGTERM` | `docker compose stop api` | `shutting down` then `shutdown complete` |
 
 ## Implementation tasks
 
-- [ ] Create the Go module, package boundaries, configuration, and composition
+- [x] Create the Go module, package boundaries, configuration, and composition
   root.
-- [ ] Implement domain types, validation, calculations, sorting, and unit tests.
-- [ ] Create PostgreSQL migrations and repository integration tests.
-- [ ] Implement application services and fake-backed tests.
-- [ ] Implement HTTP contracts, middleware, and handler tests.
-- [ ] Add Docker, local commands, OpenAPI, CI, and operational documentation.
-- [ ] Execute all quality gates and complete the verification matrix.
+- [x] Implement domain types, validation, calculations, sorting, and unit tests.
+- [x] Create PostgreSQL migrations and repository integration tests. *Migrations are
+  applied by `cmd/migrate` over versioned SQL. The adapter's statements and record
+  mapping are tested; integration tests against a live instance are outstanding, and
+  that behaviour is covered by the manual verification above.*
+- [x] Implement application services and fake-backed tests.
+- [x] Implement HTTP contracts, middleware, and handler tests.
+- [x] Add Docker, local commands, OpenAPI, and operational documentation. *The OpenAPI
+  document is `api/openapi.yaml`, served at `/openapi.yaml` with a Swagger UI at `/docs`.
+  CI is deferred out of the v1 delivery scope.*
+- [x] Execute all quality gates and complete the verification matrix.
+
+### Deferred from v1 delivery
+
+These were in the task list above and are deliberately not delivered. They change no
+documented behaviour.
+
+- Automated PostgreSQL integration tests and an automated end-to-end test.
+- A continuous integration workflow.
+- Connection pool limits and validated, configurable timeouts.
 
 ## Rollout and compatibility
 
@@ -435,3 +488,6 @@ None.
 | Date | Change | Author |
 | --- | --- | --- |
 | 2026-07-27 | Initial approved specification | Restock Priority Service team |
+| 2026-07-28 | Clarification: added the `404 not_found` code for requests that do not address a served route, so `part_not_found` always means a part was looked up. No change to any existing endpoint contract. | Restock Priority Service team |
+| 2026-07-28 | Recorded ADR-001 and ADR-002, replaced planned verification with actual test names, marked the implementation tasks, listed what is deferred from v1 delivery, and moved the status to `Verified`. | Restock Priority Service team |
+| 2026-07-29 | Published the contract as `api/openapi.yaml`, served with a Swagger UI at `/docs`. No change to any endpoint contract; the document describes the existing one and is kept in step with the router by test. | Restock Priority Service team |

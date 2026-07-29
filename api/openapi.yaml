@@ -1,0 +1,634 @@
+openapi: 3.0.3
+
+info:
+  title: Restock Priority Service
+  version: "1.0.0"
+  description: |
+    Manages automotive parts inventory and ranks which parts to replenish first,
+    given limited stock, limited working capital, distinct sales patterns, supplier
+    lead time and operational criticality.
+
+    ## Ranking rules
+
+    A part is a restock candidate when its projected stock falls below its minimum:
+
+    ```
+    expectedConsumption = averageDailySales * leadTimeDays
+    projectedStock      = currentStock - expectedConsumption
+    needsRestock        = projectedStock < minimumStock
+    urgencyScore        = (minimumStock - projectedStock) * criticalityLevel
+    ```
+
+    Candidates are ordered by `urgencyScore` descending, then `criticalityLevel`
+    descending, then `averageDailySales` descending, then `name` ascending compared
+    case-insensitively, then by identifier. The last two levels make the ranking a
+    total order, so the same data always produces the same sequence.
+
+    Current stock is never clamped: negative current and projected stock flow through
+    the formulas unchanged. `unitCost` is stored and returned but does not affect
+    eligibility or priority.
+
+    ## A note on the challenge example
+
+    The original brief's example response is inconsistent with the formulas the brief
+    itself states. For `currentStock: 15`, `averageDailySales: 4`, `leadTimeDays: 5`,
+    `minimumStock: 20`, `criticalityLevel: 3`, the formulas give `projectedStock: -5`
+    and `urgencyScore: 75`, while the example prints `5` and `45`. The example's second
+    row is internally consistent, which confirms the discrepancy is in the first row.
+    This service implements the formulas.
+
+    ## Conventions
+
+    Field names are camelCase. Decimal values are JSON numbers, never quoted strings.
+    Request bodies reject unknown fields and trailing JSON values, and are limited to
+    1 MiB. Errors always use the same envelope with a stable machine-readable code.
+
+externalDocs:
+  description: Normative specification (SPEC-001)
+  url: https://github.com/Gabrielbsb21/restock-priority-service/blob/main/docs/sdd/specs/001-core-service.md
+
+servers:
+  # Relative on purpose: "Try it out" then targets whichever host and port served this
+  # document, so it keeps working when the API is published on a non-default port.
+  - url: /
+    description: The server that served this document
+
+tags:
+  - name: Parts
+    description: Inventory and replenishment attributes of each part.
+  - name: Restock
+    description: Which parts to replenish first.
+  - name: Health
+    description: Liveness and readiness probes.
+
+paths:
+  /parts:
+    post:
+      tags: [Parts]
+      summary: Create a part
+      operationId: createPart
+      description: The service generates the identifier. Name and category are trimmed before validation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PartWrite"
+      responses:
+        "201":
+          description: Created.
+          headers:
+            Location:
+              description: Path of the created part.
+              schema:
+                type: string
+                example: /parts/cdb09c19-9aa0-4f11-a5d8-c496bc52927f
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Part"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    get:
+      tags: [Parts]
+      summary: List parts
+      operationId: listParts
+      description: |
+        Returns one page plus the total matching the filter. The stable default ordering
+        is `name` ascending compared case-insensitively, then by identifier. An empty
+        result is a success with an empty `items` array.
+      parameters:
+        - $ref: "#/components/parameters/Category"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: A page of parts.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /parts/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PartId"
+
+    get:
+      tags: [Parts]
+      summary: Fetch one part
+      operationId: getPart
+      responses:
+        "200":
+          description: The part.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Part"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/PartNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    put:
+      tags: [Parts]
+      summary: Replace a part
+      operationId: replacePart
+      description: |
+        Replaces every mutable field. Partial updates are not supported: a missing field
+        is a validation error, not an instruction to keep the previous value. Numeric
+        fields sent as `0` are stored as `0`. The identifier is taken from the path and
+        does not change. Semantics are last-write-wins; optimistic concurrency is out of
+        scope for v1.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PartWrite"
+      responses:
+        "200":
+          description: The replaced part.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Part"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/PartNotFound"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      tags: [Parts]
+      summary: Delete a part
+      operationId: deletePart
+      description: Permanent. Repeating a successful deletion reports the part as missing.
+      responses:
+        "204":
+          description: Deleted. The response has no body.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/PartNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /restock/priorities:
+    get:
+      tags: [Restock]
+      summary: Parts to replenish, ranked by urgency
+      operationId: listRestockPriorities
+      description: |
+        Returns only parts that need restocking, ordered by the rules described at the
+        top of this document. Parts whose projected stock equals their minimum are
+        excluded, because the eligibility comparison is strict.
+
+        This endpoint takes no query parameters in v1 and is not paginated. An empty
+        ranking is a success with an empty `priorities` array.
+      responses:
+        "200":
+          description: The ranking, most urgent first.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PriorityList"
+              examples:
+                challengeExample:
+                  summary: The brief's example inputs, with the formulas applied
+                  value:
+                    priorities:
+                      - partId: cdb09c19-9aa0-4f11-a5d8-c496bc52927f
+                        name: Filtro de Óleo X
+                        currentStock: 15
+                        projectedStock: -5
+                        minimumStock: 20
+                        urgencyScore: 75
+                      - partId: 725e3eb5-c3a1-40b7-8d73-a47b26c4951c
+                        name: Pastilha de Freio Y
+                        currentStock: 8
+                        projectedStock: -2
+                        minimumStock: 10
+                        urgencyScore: 36
+                empty:
+                  summary: Nothing needs restocking
+                  value:
+                    priorities: []
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Liveness
+      operationId: getLiveness
+      description: Reports that the process can serve HTTP. Does not query PostgreSQL.
+      responses:
+        "200":
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /readyz:
+    get:
+      tags: [Health]
+      summary: Readiness
+      operationId: getReadiness
+      description: |
+        Performs a bounded PostgreSQL check. Returns `503` when the dependency is
+        unavailable or the check times out, so liveness and readiness diverge while the
+        database is down.
+      responses:
+        "200":
+          description: The dependency is reachable.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: ready
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+components:
+  headers:
+    XRequestId:
+      description: Correlation identifier, echoed from the request when it is a valid UUID.
+      schema:
+        type: string
+        format: uuid
+
+  parameters:
+    PartId:
+      name: id
+      in: path
+      required: true
+      description: Canonical UUID of the part.
+      schema:
+        type: string
+        format: uuid
+      example: cdb09c19-9aa0-4f11-a5d8-c496bc52927f
+
+    Category:
+      name: category
+      in: query
+      required: false
+      description: |
+        Exact match after trimming. Categories are case-sensitive stored values, not a
+        fixed enumeration. Present but empty is invalid rather than ignored.
+      schema:
+        type: string
+        minLength: 1
+      example: engine
+
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+
+    Offset:
+      name: offset
+      in: query
+      required: false
+      description: Number of parts to skip. An offset past the end is a success with an empty page.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+
+  responses:
+    BadRequest:
+      description: |
+        Either the request could not be read (`invalid_request`: malformed JSON, an
+        unknown field, a trailing JSON value, a non-UUID path parameter or an invalid
+        query parameter), or its values violate a domain invariant
+        (`validation_error`, which may name more than one field).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          examples:
+            invalidRequest:
+              summary: The request could not be read
+              value:
+                error:
+                  code: invalid_request
+                  message: invalid UUID path parameter
+            validationError:
+              summary: The values are invalid
+              value:
+                error:
+                  code: validation_error
+                  message: the request contains invalid fields
+                  fields:
+                    criticalityLevel: must be between 1 and 5
+                    minimumStock: must be greater than or equal to zero
+
+    PartNotFound:
+      description: No part has the requested identifier.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: part_not_found
+              message: part with requested ID was not found
+
+    RequestTooLarge:
+      description: The request body exceeds the configured 1 MiB limit.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: request_too_large
+              message: request body exceeds limit
+
+    InternalError:
+      description: |
+        An unexpected application or dependency failure, such as PostgreSQL being
+        unreachable. The cause is logged with the request identifier and never returned.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: internal_error
+              message: an unexpected error occurred
+
+    ServiceUnavailable:
+      description: A readiness dependency is unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: service_unavailable
+              message: readiness dependency is unavailable
+
+  schemas:
+    PartWrite:
+      type: object
+      description: The mutable attributes of a part. Every field is required.
+      required:
+        - name
+        - category
+        - currentStock
+        - minimumStock
+        - averageDailySales
+        - leadTimeDays
+        - unitCost
+        - criticalityLevel
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Trimmed value must not be empty. Length is counted in Unicode characters.
+          example: Filtro de Óleo X
+        category:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Free-form, case-sensitive. Trimmed value must not be empty.
+          example: engine
+        currentStock:
+          type: integer
+          format: int64
+          description: Stock on hand. May be negative when recorded demand exceeds available inventory.
+          example: 15
+        minimumStock:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Desired floor for stock on hand.
+          example: 20
+        averageDailySales:
+          type: number
+          minimum: 0
+          description: Units sold per day. Fractional values are exact, not floating point approximations.
+          example: 4
+        leadTimeDays:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Days the supplier takes to deliver.
+          example: 5
+        unitCost:
+          type: number
+          minimum: 0
+          description: |
+            Cost per unit, with at most two fractional digits. Stored and returned, but
+            it does not affect restock eligibility or priority.
+          example: 18.50
+        criticalityLevel:
+          type: integer
+          minimum: 1
+          maximum: 5
+          description: Operational importance, 1 through 5 inclusive.
+          example: 3
+
+    Part:
+      type: object
+      description: A stored part.
+      required:
+        - id
+        - name
+        - category
+        - currentStock
+        - minimumStock
+        - averageDailySales
+        - leadTimeDays
+        - unitCost
+        - criticalityLevel
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+          description: Generated by the service and immutable.
+          example: cdb09c19-9aa0-4f11-a5d8-c496bc52927f
+        name:
+          type: string
+          example: Filtro de Óleo X
+        category:
+          type: string
+          example: engine
+        currentStock:
+          type: integer
+          format: int64
+          example: 15
+        minimumStock:
+          type: integer
+          format: int64
+          example: 20
+        averageDailySales:
+          type: number
+          example: 4
+        leadTimeDays:
+          type: integer
+          format: int32
+          example: 5
+        unitCost:
+          type: number
+          example: 18.50
+        criticalityLevel:
+          type: integer
+          example: 3
+
+    Pagination:
+      type: object
+      required: [limit, offset, total]
+      properties:
+        limit:
+          type: integer
+          description: Page size that was applied.
+          example: 50
+        offset:
+          type: integer
+          description: Number of parts skipped.
+          example: 0
+        total:
+          type: integer
+          description: Total parts matching the filter, not the size of this page.
+          example: 2
+
+    PartList:
+      type: object
+      required: [items, pagination]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Part"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    PriorityItem:
+      type: object
+      description: |
+        A ranked restock candidate. The contract is exactly these six fields: category,
+        criticality, sales, unit cost and expected consumption are deliberately absent.
+      required:
+        - partId
+        - name
+        - currentStock
+        - projectedStock
+        - minimumStock
+        - urgencyScore
+      properties:
+        partId:
+          type: string
+          format: uuid
+          example: cdb09c19-9aa0-4f11-a5d8-c496bc52927f
+        name:
+          type: string
+          example: Filtro de Óleo X
+        currentStock:
+          type: integer
+          format: int64
+          example: 15
+        projectedStock:
+          type: number
+          description: May be negative, and is reported as calculated.
+          example: -5
+        minimumStock:
+          type: integer
+          format: int64
+          example: 20
+        urgencyScore:
+          type: number
+          description: Higher means more urgent. Exact, so a value beyond int64 range stays correct.
+          example: 75
+
+    PriorityList:
+      type: object
+      required: [priorities]
+      properties:
+        priorities:
+          type: array
+          description: Most urgent first. Empty when nothing needs restocking.
+          items:
+            $ref: "#/components/schemas/PriorityItem"
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable, machine-readable reason.
+          enum:
+            - invalid_request
+            - validation_error
+            - part_not_found
+            - not_found
+            - method_not_allowed
+            - request_too_large
+            - internal_error
+            - service_unavailable
+        message:
+          type: string
+          description: Human-readable summary. Never contains SQL, stack traces or dependency detail.
+        fields:
+          type: object
+          additionalProperties:
+            type: string
+          description: Present only when field-level detail is useful, keyed by the field name used on the wire.
+
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/Error"
