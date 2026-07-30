@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch cancels the run it supersedes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain comes from go.mod, so the version CI uses cannot drift from the
+      # version the module declares.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      # go.mod and go.sum must already be what `go mod tidy` produces. Without this,
+      # a stale requirement is invisible until an unrelated build fails.
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      # The same gate the repository documents for local use: gofmt, go vet, the test
+      # suite, and the suite again under the race detector.
+      - name: Run quality gates
+        run: make check
+
+      - name: Build binaries
+        run: make build

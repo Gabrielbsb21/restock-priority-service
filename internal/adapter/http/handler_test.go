@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	adapterHTTP "github.com/Gabrielbsb21/restock-priority-service/internal/adapter/http"
 	"github.com/Gabrielbsb21/restock-priority-service/internal/adapter/memory"
@@ -264,6 +265,38 @@ func TestHTTP_CreatePart_ValidationErrors(t *testing.T) {
 			require.Equal(t, http.StatusOK, list.Code)
 			pagination := decodeBody(t, list)["pagination"].(map[string]any)
 			assert.Equal(t, float64(0), pagination["total"])
+		})
+	}
+}
+
+// TestHTTP_CreatePart_RejectsHugeExponent covers AC-017, the transport-level contract
+// for BR-015.
+//
+// The body is 143 bytes, so MaxBodyBytes never comes into play: the cost is entirely
+// in the number the body describes. Before the bound existed this request answered
+// 201 with a ten-megabyte body after two and a half seconds of arithmetic, and the
+// part it created re-rendered on every later list and ranking call. All three
+// assertions below — the status, the size, the clock — failed then and are the gate
+// against reintroducing it.
+func TestHTTP_CreatePart_RejectsHugeExponent(t *testing.T) {
+	const budget = time.Second
+
+	for _, field := range []string{"averageDailySales", "unitCost"} {
+		t.Run(field, func(t *testing.T) {
+			body := validBody()
+			body[field] = json.RawMessage("1e10000000")
+
+			start := time.Now()
+			recorder := do(t, setupRouter(), http.MethodPost, "/parts", body)
+			elapsed := time.Since(start)
+
+			envelope := assertErrorCode(t, recorder, http.StatusBadRequest, "validation_error")
+			fields, ok := envelope["fields"].(map[string]any)
+			require.True(t, ok, "field-level detail is expected here")
+			assert.Contains(t, fields, field)
+
+			assert.Less(t, recorder.Body.Len(), 1024, "the rejection must not carry the number")
+			assert.Less(t, elapsed, budget, "the request must not render the number")
 		})
 	}
 }

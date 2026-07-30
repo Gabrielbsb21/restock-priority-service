@@ -4,6 +4,8 @@ Serviço HTTP que gerencia peças de reposição de autopeças e decide **quais 
 reposição**, considerando estoque limitado, capital de giro limitado, padrões de venda
 distintos, tempo de entrega do fornecedor e criticidade operacional.
 
+[![CI](https://github.com/Gabrielbsb21/restock-priority-service/actions/workflows/ci.yml/badge.svg)](https://github.com/Gabrielbsb21/restock-priority-service/actions/workflows/ci.yml)
+
 Go 1.26 · Gin · GORM · PostgreSQL · arquitetura hexagonal
 
 ---
@@ -218,6 +220,14 @@ exato (`github.com/shopspring/decimal`). `float64` nunca representa dinheiro nem
 de comparação de desempate — então igualdade no ranking é exata, e um `urgencyScore` maior
 que `int64` continua correto em vez de estourar.
 
+Os dois campos decimais são limitados **em cima** também, por contagem de dígitos: no
+máximo 13 antes da vírgula, 6 depois em `averageDailySales`, 2 em `unitCost` (BR-015). Um
+decimal exato é coeficiente + expoente, então `1e10000000` são dez bytes pra aceitar e dez
+megabytes pra renderizar — em toda escrita, toda resposta e toda passada de ranking. Uma
+peça dessas gravada bastaria pra derrubar `GET /restock/priorities` de forma permanente. A
+validação compara contagem de dígitos, que lê o expoente em vez de materializar o número,
+então a guarda em si é de graça.
+
 ### Escala
 
 O ranking custa `O(n)` para calcular e `O(n log n)` para ordenar, em processo, com memória
@@ -354,6 +364,10 @@ Roda os quality gates de
 [docs/engineering/go-guidelines.md](docs/engineering/go-guidelines.md): verificação de
 `gofmt`, `go vet`, a suíte, e a suíte de novo com detector de corrida.
 
+O mesmo `make check` roda em todo PR e em todo push na `main`
+([.github/workflows/ci.yml](.github/workflows/ci.yml)), junto com uma checagem de que
+`go.mod`/`go.sum` já estão como `go mod tidy` os deixaria e o build dos dois binários.
+
 Os testes são table-driven e nomeados pelo critério de aceite que verificam. Os cenários
 extremos que o enunciado cobra têm cobertura explícita: **estoque negativo**, **venda
 zero**, **lead time altíssimo** (`math.MaxInt32`), lead time zero, estoque projetado
@@ -370,7 +384,8 @@ aparece como 0% só porque quem o exercita são os testes de outro pacote.
 | `internal/adapter/http` | ~99% |
 | `internal/adapter/memory` | ~97% |
 | `internal/adapter/postgres` | ~39% |
-| `cmd/*`, `internal/platform/config` | sem teste |
+| `internal/platform/config` | 100% |
+| `cmd/*` | sem teste |
 
 O `postgres` é parcial de propósito: os testes dele verificam **o SQL que o adapter monta**,
 usando o `DryRun` do GORM — sem precisar de banco — e é isso que trava a regressão do `PUT`
@@ -403,5 +418,5 @@ devolvido, mas não entra no ranking (BR-013). A lista completa, com as razões,
 [docs/project-overview.md](docs/project-overview.md).
 
 Adiado da entrega, não do escopo: testes de integração automatizados contra PostgreSQL,
-teste end-to-end automatizado, workflow de CI, limites de pool de conexão e timeouts
-configuráveis validados.
+teste end-to-end automatizado, limites de pool de conexão e timeouts configuráveis
+validados.

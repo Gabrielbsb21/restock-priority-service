@@ -34,14 +34,6 @@ func (failingRepository) ListAll(context.Context) ([]*domain.Part, error) {
 	return nil, errRepository
 }
 
-// updateFailingRepository finds parts but cannot write them, so UpdatePart reaches its
-// second repository call instead of returning at the lookup.
-type updateFailingRepository struct {
-	*memory.PartRepository
-}
-
-func (updateFailingRepository) Update(context.Context, *domain.Part) error { return errRepository }
-
 func newPart(name, category string) *domain.Part {
 	return &domain.Part{
 		Name:              name,
@@ -384,19 +376,21 @@ func TestPartService_PropagatesRepositoryErrors(t *testing.T) {
 	assert.ErrorIs(t, service.DeletePart(ctx, uuid.New()), errRepository)
 }
 
-// TestPartService_UpdatePart_PropagatesWriteFailure reaches the branch a repository that
-// fails every call cannot: the part is found, and only the write fails.
-func TestPartService_UpdatePart_PropagatesWriteFailure(t *testing.T) {
+// TestPartService_UpdatePart_ValidatesBeforeWriting pins the ordering the write path
+// depends on: an invalid replacement is refused without the repository being touched,
+// so a rejected update cannot leave a partial row behind.
+func TestPartService_UpdatePart_ValidatesBeforeWriting(t *testing.T) {
 	t.Parallel()
 
-	repo := memory.NewPartRepository()
+	service := application.NewPartService(failingRepository{})
 
-	existing := newPart("Air Filter A", "filter")
-	existing.ID = uuid.New()
-	require.NoError(t, repo.Create(context.Background(), existing))
+	invalid := newPart("Air Filter A", "filter")
+	invalid.CriticalityLevel = 9
 
-	service := application.NewPartService(updateFailingRepository{repo})
+	_, err := service.UpdatePart(context.Background(), uuid.New(), invalid)
 
-	_, err := service.UpdatePart(context.Background(), existing.ID, newPart("Air Filter B", "engine"))
-	assert.ErrorIs(t, err, errRepository)
+	var fieldErrs domain.FieldErrors
+	require.ErrorAs(t, err, &fieldErrs)
+	assert.Contains(t, fieldErrs, "criticalityLevel")
+	assert.NotErrorIs(t, err, errRepository, "the repository must not be reached")
 }

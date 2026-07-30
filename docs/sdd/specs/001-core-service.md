@@ -60,9 +60,9 @@ A `Part` contains:
 | `category` | string | string | Yes | Trimmed value must not be empty; maximum 100 Unicode characters |
 | `currentStock` | integer | signed 64-bit integer | Yes | Negative values are allowed |
 | `minimumStock` | integer | signed 64-bit integer | Yes | Must be greater than or equal to zero |
-| `averageDailySales` | number | exact decimal | Yes | Must be greater than or equal to zero |
+| `averageDailySales` | number | exact decimal | Yes | Must be greater than or equal to zero, with at most 13 digits before the decimal point and 6 after it |
 | `leadTimeDays` | integer | signed 32-bit integer | Yes | Must be greater than or equal to zero |
-| `unitCost` | number | exact decimal | Yes | Must be greater than or equal to zero and have at most two fractional digits |
+| `unitCost` | number | exact decimal | Yes | Must be greater than or equal to zero, with at most 13 digits before the decimal point and 2 after it |
 | `criticalityLevel` | integer | integer | Yes | Must be between 1 and 5, inclusive |
 
 The service trims `name` and `category` before validation and persistence.
@@ -136,6 +136,12 @@ of the v1 public part representation.
   eligibility or priority.
 - **BR-014:** The written formulas in this specification take precedence over the
   inconsistent numeric example in the original challenge.
+- **BR-015:** The decimal fields must be bounded above by digit count, not only
+  below by sign. An exact decimal is a coefficient and an exponent, so a payload of
+  a few bytes can describe a number that takes megabytes to render — and rendering
+  happens on every write, every response and every ranking pass, which makes one
+  accepted value enough to disable `GET /restock/priorities`. Validation must reject
+  such a value without materializing it.
 
 ## API conventions
 
@@ -393,6 +399,9 @@ Successful response:
   the same order and values.
 - **AC-016:** Given two parts with different unit costs but identical ranking
   inputs, unit cost does not alter eligibility or priority.
+- **AC-017:** Given a decimal field whose exponent puts it past the documented digit
+  limits, the service returns a field-level client error, stores nothing, and answers
+  without rendering the number.
 
 ## Test strategy
 
@@ -460,8 +469,10 @@ step is reproducible with `make docker-up`.
 - [x] Implement application services and fake-backed tests.
 - [x] Implement HTTP contracts, middleware, and handler tests.
 - [x] Add Docker, local commands, OpenAPI, and operational documentation. *The OpenAPI
-  document is `api/openapi.yaml`, served at `/openapi.yaml` with a Swagger UI at `/docs`.
-  CI is deferred out of the v1 delivery scope.*
+  document is `api/openapi.yaml`, served at `/openapi.yaml` with a Swagger UI at `/docs`.*
+- [x] Run the quality gates on every change. *`.github/workflows/ci.yml` runs `make check`
+  on pull requests and pushes to `main`, and additionally asserts that `go.mod` and
+  `go.sum` are already tidy.*
 - [x] Execute all quality gates and complete the verification matrix.
 
 ### Deferred from v1 delivery
@@ -470,7 +481,6 @@ These were in the task list above and are deliberately not delivered. They chang
 documented behaviour.
 
 - Automated PostgreSQL integration tests and an automated end-to-end test.
-- A continuous integration workflow.
 - Connection pool limits and validated, configurable timeouts.
 
 ## Rollout and compatibility
