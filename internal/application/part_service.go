@@ -58,14 +58,15 @@ func (s *PartService) ListParts(ctx context.Context, filter ListFilter) ([]*doma
 	return s.repo.List(ctx, filter)
 }
 
+// UpdatePart replaces a part in full.
+//
+// There is no existence check before the write: the repository reports a missing part
+// from the write itself, so a preceding read would only add a round trip and a window
+// in which the row could vanish between the two calls. Validation still runs first, so
+// an invalid replacement never reaches storage.
 func (s *PartService) UpdatePart(ctx context.Context, id uuid.UUID, updated *domain.Part) (*domain.Part, error) {
-	// Verify part exists
-	existing, err := s.repo.GetByID(ctx, id)
-	if err != nil {
-		return nil, err
-	}
+	updated.ID = id
 
-	updated.ID = existing.ID
 	if err := updated.Validate(); err != nil {
 		return nil, err
 	}

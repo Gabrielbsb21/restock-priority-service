@@ -2,10 +2,29 @@ package domain
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
+)
+
+// The decimal fields are bounded above as well as below, and the bound counts digits
+// rather than comparing values.
+//
+// decimal.Decimal stores a coefficient and an exponent, so "1e10000000" costs ten
+// bytes to accept and ten megabytes to render — and it is rendered on every write,
+// every response, and every ranking pass. A single such row is enough to make
+// GET /restock/priorities unusable. Counting digits reads the exponent instead of
+// materializing the number, so the guard itself stays cheap.
+//
+// maxIntegerDigits is unit_cost's own column limit: NUMERIC(15, 2) holds thirteen
+// digits before the point. What the column would have rejected as a write error now
+// fails validation as a field error.
+const (
+	maxIntegerDigits            = 13
+	maxUnitCostFractionalDigits = 2
+	maxSalesFractionalDigits    = 6
 )
 
 // FieldErrors reports every invalid field of a single request at once, keyed by the
@@ -64,6 +83,8 @@ func (p *Part) Validate() error {
 
 	if p.AverageDailySales.IsNegative() {
 		errs["averageDailySales"] = "must be greater than or equal to zero"
+	} else if msg := decimalRangeError(p.AverageDailySales, maxSalesFractionalDigits, "must have at most six fractional digits"); msg != "" {
+		errs["averageDailySales"] = msg
 	}
 
 	if p.LeadTimeDays < 0 {
@@ -72,8 +93,8 @@ func (p *Part) Validate() error {
 
 	if p.UnitCost.IsNegative() {
 		errs["unitCost"] = "must be greater than or equal to zero"
-	} else if p.UnitCost.Exponent() < -2 {
-		errs["unitCost"] = "must have at most two fractional digits"
+	} else if msg := decimalRangeError(p.UnitCost, maxUnitCostFractionalDigits, "must have at most two fractional digits"); msg != "" {
+		errs["unitCost"] = msg
 	}
 
 	if p.CriticalityLevel < 1 || p.CriticalityLevel > 5 {
@@ -85,4 +106,31 @@ func (p *Part) Validate() error {
 	}
 
 	return nil
+}
+
+// decimalRangeError reports why d is out of range, or an empty string when it is
+// acceptable. The scale is checked first because the exponent alone settles it, and
+// the caller supplies that message so each field keeps its own wording.
+func decimalRangeError(d decimal.Decimal, maxFractionalDigits int, scaleMessage string) string {
+	if int(d.Exponent()) < -maxFractionalDigits {
+		return scaleMessage
+	}
+
+	if integerDigits(d) > maxIntegerDigits {
+		return "must not have more than " + strconv.Itoa(maxIntegerDigits) + " digits before the decimal point"
+	}
+
+	return ""
+}
+
+// integerDigits reports how many digits sit before the decimal point, derived from
+// the length of the coefficient and the exponent. A value below one is reported as a
+// single digit, which is what "0.5" occupies on the wire.
+func integerDigits(d decimal.Decimal) int {
+	digits := d.NumDigits() + int(d.Exponent())
+	if digits < 1 {
+		return 1
+	}
+
+	return digits
 }

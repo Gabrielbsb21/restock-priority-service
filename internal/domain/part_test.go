@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Gabrielbsb21/restock-priority-service/internal/domain"
 	"github.com/shopspring/decimal"
@@ -74,6 +75,32 @@ func TestPart_Validate_FieldRules(t *testing.T) {
 			name:   "sales with many fractional digits is accepted",
 			mutate: func(p *domain.Part) { p.AverageDailySales = decimal.RequireFromString("0.123456") },
 		},
+		{
+			name:      "sales with one fractional digit too many",
+			mutate:    func(p *domain.Part) { p.AverageDailySales = decimal.RequireFromString("0.1234567") },
+			wantField: "averageDailySales",
+		},
+		{
+			name:   "sales at the integer digit limit",
+			mutate: func(p *domain.Part) { p.AverageDailySales = decimal.RequireFromString("9999999999999") },
+		},
+		{
+			name:      "sales one integer digit past the limit",
+			mutate:    func(p *domain.Part) { p.AverageDailySales = decimal.RequireFromString("10000000000000") },
+			wantField: "averageDailySales",
+		},
+		{
+			// BR-015. The coefficient is a single digit, so nothing but the exponent
+			// reveals that rendering this value would produce ten megabytes.
+			name:      "sales carrying a huge positive exponent",
+			mutate:    func(p *domain.Part) { p.AverageDailySales = decimal.RequireFromString("1e10000000") },
+			wantField: "averageDailySales",
+		},
+		{
+			name:      "sales carrying a huge negative exponent",
+			mutate:    func(p *domain.Part) { p.AverageDailySales = decimal.RequireFromString("1e-10000000") },
+			wantField: "averageDailySales",
+		},
 
 		{name: "zero lead time", mutate: func(p *domain.Part) { p.LeadTimeDays = 0 }},
 		{name: "negative lead time", mutate: func(p *domain.Part) { p.LeadTimeDays = -2 }, wantField: "leadTimeDays"},
@@ -99,6 +126,21 @@ func TestPart_Validate_FieldRules(t *testing.T) {
 			wantField: "unitCost",
 		},
 		{name: "whole unit cost", mutate: func(p *domain.Part) { p.UnitCost = decimal.RequireFromString("18") }},
+		{
+			// The largest value NUMERIC(15, 2) can hold.
+			name:   "unit cost at the integer digit limit",
+			mutate: func(p *domain.Part) { p.UnitCost = decimal.RequireFromString("9999999999999.99") },
+		},
+		{
+			name:      "unit cost one integer digit past the limit",
+			mutate:    func(p *domain.Part) { p.UnitCost = decimal.RequireFromString("10000000000000") },
+			wantField: "unitCost",
+		},
+		{
+			name:      "unit cost carrying a huge positive exponent",
+			mutate:    func(p *domain.Part) { p.UnitCost = decimal.RequireFromString("1e10000000") },
+			wantField: "unitCost",
+		},
 
 		{name: "criticality below the range", mutate: func(p *domain.Part) { p.CriticalityLevel = 0 }, wantField: "criticalityLevel"},
 		{name: "negative criticality", mutate: func(p *domain.Part) { p.CriticalityLevel = -1 }, wantField: "criticalityLevel"},
@@ -125,6 +167,35 @@ func TestPart_Validate_FieldRules(t *testing.T) {
 			require.ErrorAs(t, err, &fieldErrs)
 			assert.Contains(t, fieldErrs, tc.wantField)
 			assert.Len(t, fieldErrs, 1, "only the mutated field should be reported")
+		})
+	}
+}
+
+// TestPart_Validate_RejectsHugeExponentsCheaply is the regression gate for BR-015.
+//
+// The point of the rule is not only that the value is refused but that refusing it is
+// free. Rendering 1e10000000 takes over two seconds and allocates ten megabytes, so a
+// guard that reached for the digits — String, Value, a comparison against a literal
+// bound — would blow this budget by three orders of magnitude while the digit count
+// path costs microseconds. No t.Parallel, so a busy sibling cannot borrow the clock.
+func TestPart_Validate_RejectsHugeExponentsCheaply(t *testing.T) {
+	const budget = time.Second
+
+	for _, raw := range []string{"1e10000000", "1e-10000000", "-1e10000000"} {
+		t.Run(raw, func(t *testing.T) {
+			part := validPart()
+			part.AverageDailySales = decimal.RequireFromString(raw)
+			part.UnitCost = decimal.RequireFromString(raw)
+
+			start := time.Now()
+			err := part.Validate()
+			elapsed := time.Since(start)
+
+			var fieldErrs domain.FieldErrors
+			require.ErrorAs(t, err, &fieldErrs)
+			assert.Contains(t, fieldErrs, "averageDailySales")
+			assert.Contains(t, fieldErrs, "unitCost")
+			assert.Less(t, elapsed, budget, "validation must not materialize the number")
 		})
 	}
 }

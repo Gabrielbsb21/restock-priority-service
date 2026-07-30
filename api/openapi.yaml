@@ -456,7 +456,12 @@ components:
         averageDailySales:
           type: number
           minimum: 0
-          description: Units sold per day. Fractional values are exact, not floating point approximations.
+          maximum: 9999999999999.999999
+          description: |
+            Units sold per day. Fractional values are exact, not floating point
+            approximations. At most 13 digits before the decimal point and 6 after it;
+            exponent notation is accepted but is bounded by those same limits, so
+            `1e10000000` is rejected rather than stored.
           example: 4
         leadTimeDays:
           type: integer
@@ -467,9 +472,12 @@ components:
         unitCost:
           type: number
           minimum: 0
+          maximum: 9999999999999.99
+          multipleOf: 0.01
           description: |
-            Cost per unit, with at most two fractional digits. Stored and returned, but
-            it does not affect restock eligibility or priority.
+            Cost per unit, with at most two fractional digits and at most 13 digits
+            before the decimal point. Stored and returned, but it does not affect
+            restock eligibility or priority.
           example: 18.50
         criticalityLevel:
           type: integer
